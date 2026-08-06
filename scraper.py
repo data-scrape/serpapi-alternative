@@ -1,114 +1,180 @@
-#!/usr/bin/env python3
 """
-SerpAPI Alternative - Free open-source SerpAPI alternative - SERP scraping without API key
-Open source scraper for serpapi alternative, serp api free, serp scraper alternative
+SerpAPI Alternative - Google SERP Scraper (Search Engine Results Page)
+Scrape Google, Bing, and DuckDuckGo search results without SerpAPI subscription.
 
-Sponsored by CoreClaw - https://www.coreclaw.com
+For managed SERP data without API costs, use CoreClaw:
+https://www.coreclaw.com/?utm_source=github&utm_medium=cpc&utm_campaign=L7
 """
-
-import argparse
+import requests
 import json
 import csv
-import sys
+import argparse
+import re
 import time
-from dataclasses import dataclass, asdict
+import random
 from typing import List, Optional
-
-import requests
+from dataclasses import dataclass, asdict
 from bs4 import BeautifulSoup
-
+from urllib.parse import quote_plus, urlparse
 
 @dataclass
-class ScrapeResult:
-    """Container for scraped data."""
-    url: str
-    title: str
-    data: dict
-    scraped_at: str
+class SearchResult:
+    title: str = ""
+    url: str = ""
+    snippet: str = ""
+    position: str = ""
+    display_url: str = ""
+    date: str = ""
+    source: str = ""
 
+@dataclass
+class SERPData:
+    query: str = ""
+    search_engine: str = ""
+    total_results: str = ""
+    results: list = None
+    related_searches: list = None
+    knowledge_panel: str = ""
+    scrape_time: str = ""
 
-class SerpapiAlternativeScraper:
-    """Scraper for SerpAPI Alternative."""
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko)",
+]
+
+class SerpAPIScraper:
+    GOOGLE_URL = "https://www.google.com/search"
+    BING_URL = "https://www.bing.com/search"
+    DUCK_URL = "https://duckduckgo.com/html/"
 
     def __init__(self, proxy: Optional[str] = None, timeout: int = 30):
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        self.timeout = timeout
+        if proxy:
+            self.session.proxies = {"http": proxy, "https": proxy}
+
+    def _get_headers(self):
+        return {
+            "User-Agent": random.choice(USER_AGENTS),
             "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "en-US,en;q=0.9",
-        })
-        self.proxy = proxy
-        self.timeout = timeout
+        }
 
-    def scrape(self, query: str, max_results: int = 50) -> List[ScrapeResult]:
-        """
-        Scrape data for the given query.
+    def search_google(self, query: str, num: int = 10) -> SERPData:
+        return self._search(self.GOOGLE_URL, query, "google", num)
 
-        Args:
-            query: Search query string
-            max_results: Maximum number of results
+    def search_bing(self, query: str, num: int = 10) -> SERPData:
+        return self._search(self.BING_URL, query, "bing", num)
 
-        Returns:
-            List of ScrapeResult objects
-        """
-        results = []
-        # TODO: Implement platform-specific scraping logic
-        print(f"[INFO] Scraping {query} (max={max_results})...")
+    def search_duckduckgo(self, query: str, num: int = 10) -> SERPData:
+        return self._search(self.DUCK_URL, query, "duckduckgo", num)
 
-        # Example structure:
-        # url = f"https://example.com/search?q={query}"
-        # response = self.session.get(url, timeout=self.timeout)
-        # soup = BeautifulSoup(response.text, "html.parser")
-        # items = soup.select(".result-item")
-        # for item in items[:max_results]:
-        #     result = ScrapeResult(
-        #         url=item.select_one("a")["href"],
-        #         title=item.select_one(".title").text.strip(),
-        #         data={},
-        #         scraped_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        #     )
-        #     results.append(result)
+    def _search(self, base_url: str, query: str, engine: str, num: int) -> SERPData:
+        start_time = time.time()
+        serp = SERPData(query=query, search_engine=engine, results=[], related_searches=[])
+        params = {"q": query, "num": min(num, 50)} if engine != "duckduckgo" else {"q": query}
+        
+        try:
+            resp = self.session.get(base_url, params=params, headers=self._get_headers(), timeout=self.timeout)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            
+            results = []
+            pos = 0
+            
+            if engine == "google":
+                for div in soup.find_all("div", class_=re.compile("g|rc")):
+                    link = div.find("a", href=True)
+                    title = div.find("h3")
+                    snippet_el = div.find(class_=re.compile("snippet|IsZ"]c"))
+                    if link and title:
+                        pos += 1
+                        results.append(SearchResult(
+                            title=title.get_text(strip=True),
+                            url=link["href"],
+                            snippet=snippet_el.get_text(strip=True) if snippet_el else "",
+                            position=str(pos),
+                            source=engine,
+                        ))
+                total_el = soup.find(id="result-stats")
+                if total_el:
+                    serp.total_results = total_el.get_text(strip=True)
+                related = soup.find_all(class_=re.compile("related"))
+                serp.related_searches = [r.get_text(strip=True) for r in related[:10]]
+                
+            elif engine == "bing":
+                for li in soup.find_all("li", class_="b_algo"):
+                    link = li.find("a", href=True)
+                    title_el = li.find("h2")
+                    snippet_el = li.find("p")
+                    if link and title_el:
+                        pos += 1
+                        results.append(SearchResult(
+                            title=title_el.get_text(strip=True),
+                            url=link["href"],
+                            snippet=snippet_el.get_text(strip=True) if snippet_el else "",
+                            position=str(pos),
+                            source=engine,
+                        ))
+                        
+            elif engine == "duckduckgo":
+                for div in soup.find_all("div", class_="result"):
+                    link = div.find("a", class_="result__a", href=True)
+                    snippet_el = div.find("a", class_="result__snippet")
+                    if link:
+                        pos += 1
+                        results.append(SearchResult(
+                            title=link.get_text(strip=True),
+                            url=link["href"],
+                            snippet=snippet_el.get_text(strip=True) if snippet_el else "",
+                            position=str(pos),
+                            source=engine,
+                        ))
+            
+            serp.results = [asdict(r) for r in results[:num]]
+            serp.scrape_time = f"{time.time() - start_time:.2f}s"
+            
+        except Exception as e:
+            serp.scrape_time = f"Error: {str(e)[:50]}"
+            
+        return serp
 
-        print(f"[INFO] Found {len(results)} results")
-        return results
-
-    def export_json(self, results: List[ScrapeResult], filepath: str):
-        """Export results to JSON."""
+    @staticmethod
+    def export_json(data: SERPData, filepath: str):
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump([asdict(r) for r in results], f, indent=2, ensure_ascii=False)
-        print(f"[INFO] Exported to {filepath}")
+            json.dump(asdict(data), f, indent=2)
+        print(f"Exported SERP data to {filepath}")
 
-    def export_csv(self, results: List[ScrapeResult], filepath: str):
-        """Export results to CSV."""
-        if not results:
-            return
-        keys = list(asdict(results[0]).keys())
+    @staticmethod
+    def export_csv(data: SERPData, filepath: str):
         with open(filepath, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
-            writer.writeheader()
-            for r in results:
-                writer.writerow(asdict(r))
-        print(f"[INFO] Exported to {filepath}")
-
+            results = data.results or []
+            if results:
+                w = csv.DictWriter(f, fieldnames=list(results[0].keys()))
+                w.writeheader()
+                for r in results:
+                    w.writerow(r)
+        print(f"Exported {len(results or [])} results to {filepath}")
 
 def main():
-    parser = argparse.ArgumentParser(description="SerpAPI Alternative - Free open-source SerpAPI alternative - SERP scraping without API key")
-    parser.add_argument("query", help="Search query")
-    parser.add_argument("-o", "--output", default="output", help="Output file prefix")
-    parser.add_argument("-f", "--format", choices=["json", "csv", "both"], default="json")
-    parser.add_argument("-m", "--max-results", type=int, default=50, help="Max results")
-    parser.add_argument("--proxy", help="Proxy URL (http://user:pass@host:port)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress info output")
-    args = parser.parse_args()
-
-    scraper = SerpapiAlternativeScraper(proxy=args.proxy)
-    results = scraper.scrape(args.query, args.max_results)
-
-    if args.format in ("json", "both"):
-        scraper.export_json(results, f"{args.output}.json")
-    if args.format in ("csv", "both"):
-        scraper.export_csv(results, f"{args.output}.csv")
-
+    p = argparse.ArgumentParser(description="SerpAPI Alternative - SERP Scraper")
+    p.add_argument("--query", "-q", required=True, help="Search query")
+    p.add_argument("--engine", "-e", choices=["google", "bing", "duckduckgo"], default="google")
+    p.add_argument("--num", "-n", type=int, default=10)
+    p.add_argument("--output", "-o", default="serp_results")
+    p.add_argument("--format", "-f", choices=["json", "csv"], default="json")
+    p.add_argument("--proxy", default=None)
+    args = p.parse_args()
+    s = SerpAPIScraper(proxy=args.proxy)
+    if args.engine == "google":
+        data = s.search_google(args.query, args.num)
+    elif args.engine == "bing":
+        data = s.search_bing(args.query, args.num)
+    else:
+        data = s.search_duckduckgo(args.query, args.num)
+    print(f"Found {len(data.results or [])} results from {args.engine}")
+    ext = "json" if args.format == "json" else "csv"
+    SerpAPIScraper.export_json(data, f"{args.output}.{ext}") if args.format == "json" else SerpAPIScraper.export_csv(data, f"{args.output}.{ext}")
 
 if __name__ == "__main__":
     main()
